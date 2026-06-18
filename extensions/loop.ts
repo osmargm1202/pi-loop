@@ -68,7 +68,6 @@ function findDoneSignal(messages: AgentMessage[]): boolean {
 
 function emitState(pi: ExtensionAPI, active: boolean, iteration: number, maxIterations: number): void {
 	pi.events.emit(PI_LOOP_EVENT, { active, iteration, maxIterations });
-	pi.setStatus?.("loop", active ? `⟳ LOOP:${iteration}/${maxIterations}` : undefined);
 }
 
 export default function loopExtension(pi: ExtensionAPI) {
