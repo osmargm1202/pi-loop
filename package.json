@@ -1,0 +1,44 @@
+{
+  "name": "pi-loop",
+  "version": "0.1.0",
+  "description": "ORGM Pi agent loop extension.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/osmargm1202/pi-loop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/osmargm1202/pi-loop/issues"
+  },
+  "homepage": "https://github.com/osmargm1202/pi-loop#readme",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "orgm",
+    "loop",
+    "agent"
+  ],
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "scripts": {
+    "pack:check": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/loop.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.79.0",
+    "@earendil-works/pi-ai": "^0.79.0",
+    "@earendil-works/pi-coding-agent": "^0.79.0"
+  }
+}
