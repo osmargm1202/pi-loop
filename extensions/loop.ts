@@ -1,4 +1,4 @@
-import type { AgentEndEvent, BeforeAgentStartEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentEndEvent, AgentMessage, BeforeAgentStartEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -38,7 +38,7 @@ function loadMaxIterations(): number {
 		const raw = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
 		const loopConfig = raw?.loop as Record<string, unknown> | undefined;
 		if (typeof loopConfig?.maxIterations === "number" && loopConfig.maxIterations > 0) {
-			return loopConfig.maxIterations as number;
+			return loopConfig.maxIterations;
 		}
 	} catch {}
 	return DEFAULT_MAX_ITERATIONS;
@@ -48,7 +48,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function findDoneSignal(messages: unknown[]): boolean {
+function findDoneSignal(messages: AgentMessage[]): boolean {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (!isRecord(msg) || msg.role !== "assistant") continue;
@@ -59,8 +59,6 @@ function findDoneSignal(messages: unknown[]): boolean {
 					if (block.text.includes(LOOP_DONE_SIGNAL)) return true;
 				}
 			}
-		} else if (typeof content === "string" && content.includes(LOOP_DONE_SIGNAL)) {
-			return true;
 		}
 		// Only check the last assistant message
 		break;
@@ -104,7 +102,7 @@ export default function loopExtension(pi: ExtensionAPI) {
 	pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
 		if (!loopActive) return;
 
-		if (findDoneSignal(event.messages as unknown[])) {
+		if (findDoneSignal(event.messages)) {
 			loopActive = false;
 			emitState(pi, false, loopIteration, loopMaxIterations);
 			ctx.ui.notify(`Loop complete after ${loopIteration} iteration${loopIteration === 1 ? "" : "s"}.`, "success");
