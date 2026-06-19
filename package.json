@@ -24,6 +24,7 @@
     "README.md"
   ],
   "scripts": {
+    "test": "node --test test/loop.test.mjs",
     "pack:check": "npm pack --dry-run"
   },
   "pi": {
