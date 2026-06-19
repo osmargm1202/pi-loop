@@ -70,6 +70,52 @@ function emitState(pi: ExtensionAPI, active: boolean, iteration: number, maxIter
 	pi.events.emit(PI_LOOP_EVENT, { active, iteration, maxIterations });
 }
 
+type ParseResult =
+  | { type: "lifecycle"; command: "on" | "off" | "status" }
+  | { type: "prompt"; mode: "duration" | "count"; intervalMs?: number; maxChecks?: number; prompt: string }
+  | { type: "invalid"; error: string };
+
+export function parseLoopArgs(args: string): ParseResult {
+  const trimmed = args.trim();
+  if (!trimmed) return { type: "lifecycle", command: "status" };
+
+  const first = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
+  const rest = trimmed.slice(first.length).trim();
+
+  if (["on", "off", "status"].includes(first)) {
+    return { type: "lifecycle", command: first as "on" | "off" | "status" };
+  }
+
+  // Duration match: 30s, 2m, 1h
+  const durationMatch = first.match(/^(\d+)([smh])$/);
+  if (durationMatch) {
+    const value = parseInt(durationMatch[1]!, 10);
+    const unit = durationMatch[2]!;
+    const multipliers: Record<string, number> = { s: 1000, m: 60000, h: 3600000 };
+    if (!rest) return { type: "invalid", error: "Missing prompt for duration-mode loop" };
+    return {
+      type: "prompt",
+      mode: "duration",
+      intervalMs: value * (multipliers[unit] ?? 1000),
+      prompt: rest,
+    };
+  }
+
+  // Count match: positive integer
+  const countMatch = first.match(/^(\d+)$/);
+  if (countMatch && parseInt(countMatch[1]!, 10) > 0) {
+    if (!rest) return { type: "invalid", error: "Missing prompt for count-mode loop" };
+    return {
+      type: "prompt",
+      mode: "count",
+      maxChecks: parseInt(countMatch[1]!, 10),
+      prompt: rest,
+    };
+  }
+
+  return { type: "invalid", error: `Unrecognized loop argument: ${first}` };
+}
+
 export default function loopExtension(pi: ExtensionAPI) {
 	if (!isOrgmExtensionEnabled("loop")) return;
 
@@ -77,11 +123,21 @@ export default function loopExtension(pi: ExtensionAPI) {
 	let loopIteration = 0;
 	let loopIsInjecting = false;
 	const loopMaxIterations = loadMaxIterations();
+	let loopPromptText = "";
+	let loopPromptMode: "duration" | "count" | null = null;
+	let loopIntervalMs = 0;
+	let loopMaxChecks = 0;
+	let loopCurrentCheck = 0;
+	let loopCheckTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	pi.on("session_start", async () => {
 		loopActive = false;
 		loopIteration = 0;
 		loopIsInjecting = false;
+		loopPromptMode = null;
+		loopPromptText = "";
+		if (loopCheckTimeout) clearTimeout(loopCheckTimeout);
+		loopCheckTimeout = null;
 		emitState(pi, false, 0, loopMaxIterations);
 	});
 
@@ -103,8 +159,41 @@ export default function loopExtension(pi: ExtensionAPI) {
 
 		if (findDoneSignal(event.messages)) {
 			loopActive = false;
+			if (loopCheckTimeout) clearTimeout(loopCheckTimeout);
+			loopCheckTimeout = null;
+			loopPromptMode = null;
 			emitState(pi, false, loopIteration, loopMaxIterations);
 			ctx.ui.notify(`Loop complete after ${loopIteration} iteration${loopIteration === 1 ? "" : "s"}.`, "success");
+			return;
+		}
+
+		// Prompt mode (duration) scheduling
+		if (loopPromptMode === "duration") {
+			loopIteration++;
+			loopIsInjecting = true;
+			emitState(pi, true, loopIteration, loopMaxIterations);
+
+			if (loopCheckTimeout) clearTimeout(loopCheckTimeout);
+			loopCheckTimeout = setTimeout(() => {
+				pi.sendUserMessage(CONTINUATION_MESSAGE, { deliverAs: "nextTurn" });
+			}, loopIntervalMs);
+			return;
+		}
+
+		// Prompt mode (count) scheduling
+		if (loopPromptMode === "count") {
+			loopCurrentCheck++;
+			if (loopCurrentCheck >= loopMaxChecks) {
+				loopActive = false;
+				loopPromptMode = null;
+				emitState(pi, false, loopIteration, loopMaxIterations);
+				ctx.ui.notify(`Loop stopped: count (${loopMaxChecks}) reached`, "warning");
+				return;
+			}
+			loopIteration++;
+			loopIsInjecting = true;
+			emitState(pi, true, loopIteration, loopMaxIterations);
+			pi.sendUserMessage(CONTINUATION_MESSAGE, { deliverAs: "nextTurn" });
 			return;
 		}
 
@@ -121,40 +210,72 @@ export default function loopExtension(pi: ExtensionAPI) {
 		pi.sendUserMessage(CONTINUATION_MESSAGE, { deliverAs: "nextTurn" });
 	});
 
-	pi.registerCommand("orgm-loop", {
-		description: "Agent loop mode: /orgm-loop [on|off|status]",
+	pi.registerCommand("loop", {
+		description: "Agent loop mode: /loop [on|off|status|duration prompt|count prompt]",
 		getArgumentCompletions: (prefix) => {
 			const options = [
-				{ value: "on", label: "on — activate loop mode for this session" },
+				{ value: "on", label: "on — activate loop mode" },
 				{ value: "off", label: "off — deactivate loop mode" },
 				{ value: "status", label: "status — show current loop state" },
+				{ value: "30s", label: "30s <prompt> — check every 30 seconds" },
+				{ value: "2m", label: "2m <prompt> — check every 2 minutes" },
+				{ value: "5m", label: "5m <prompt> — check every 5 minutes" },
+				{ value: "1h", label: "1h <prompt> — check every hour" },
+				{ value: "20", label: "20 <prompt> — check up to 20 times" },
 			];
 			const normalized = prefix.trimStart().toLowerCase();
 			return options.filter((o) => o.value.startsWith(normalized));
 		},
 		handler: async (args, ctx) => {
-			const cmd = args.trim().toLowerCase();
+			const result = parseLoopArgs(args);
 
-			if (cmd === "on") {
+			if (result.type === "lifecycle") {
+				if (result.command === "on") {
+					loopActive = true;
+					emitState(pi, true, loopIteration, loopMaxIterations);
+					ctx.ui.notify(`Loop mode ON (max ${loopMaxIterations} iterations)`, "success");
+					return;
+				}
+
+				if (result.command === "off") {
+					loopActive = false;
+					loopIteration = 0;
+					loopIsInjecting = false;
+					if (loopCheckTimeout) clearTimeout(loopCheckTimeout);
+					loopCheckTimeout = null;
+					loopPromptMode = null;
+					loopPromptText = "";
+					emitState(pi, false, 0, loopMaxIterations);
+					ctx.ui.notify("Loop mode OFF", "info");
+					return;
+				}
+
+				const state = loopActive
+					? `ON — iteration ${loopIteration}/${loopMaxIterations}`
+					: "OFF";
+				ctx.ui.notify(`Loop: ${state}`, "info");
+				return;
+			}
+
+			if (result.type === "prompt") {
 				loopActive = true;
+				loopPromptText = result.prompt;
+				loopPromptMode = result.mode;
+				if (result.intervalMs) loopIntervalMs = result.intervalMs;
+				if (result.maxChecks) {
+					loopMaxChecks = result.maxChecks;
+					loopCurrentCheck = 0;
+				}
+				loopIteration = 1;
+				loopIsInjecting = true;
 				emitState(pi, true, loopIteration, loopMaxIterations);
-				ctx.ui.notify(`Loop mode ON (max ${loopMaxIterations} iterations)`, "success");
+				pi.sendUserMessage(result.prompt, { deliverAs: "nextTurn" });
+				ctx.ui.notify(`Loop ${result.mode} mode started (prompt: "${result.prompt}")`, "success");
 				return;
 			}
 
-			if (cmd === "off") {
-				loopActive = false;
-				loopIteration = 0;
-				loopIsInjecting = false;
-				emitState(pi, false, 0, loopMaxIterations);
-				ctx.ui.notify("Loop mode OFF", "info");
-				return;
-			}
-
-			const state = loopActive
-				? `ON — iteration ${loopIteration}/${loopMaxIterations}`
-				: "OFF";
-			ctx.ui.notify(`Loop: ${state}`, "info");
+			// invalid
+			ctx.ui.notify(`Loop error: ${result.error}`, "error");
 		},
 	});
 }
